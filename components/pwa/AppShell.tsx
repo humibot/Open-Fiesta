@@ -2,8 +2,8 @@
 
 import React, { useState, useEffect, Suspense } from 'react';
 import { isStandalone } from '@/lib/pwa-config';
-import { LaunchScreen } from '@/components/ui/LaunchScreen';
-import { Loading } from '@/components/ui/Loading';
+import LaunchScreen from '@/components/ui/LaunchScreen';
+import Loading from '@/components/ui/Loading';
 
 interface AppShellProps {
   children: React.ReactNode;
