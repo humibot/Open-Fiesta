@@ -1,6 +1,53 @@
 import { NextRequest } from 'next/server';
 import { Buffer } from 'node:buffer';
 
+type UsedKeyType = 'user' | 'shared' | 'none';
+
+function resolveApiKey(apiKeyFromBody: unknown): { apiKey: string | null; usedKeyType: UsedKeyType } {
+  if (typeof apiKeyFromBody === 'string' && apiKeyFromBody.trim()) {
+    return { apiKey: apiKeyFromBody.trim(), usedKeyType: 'user' };
+  }
+
+  const sharedApiKey = process.env.OPEN_PROVIDER_API_KEY || process.env.OPEN_PROVIDER_API_KEY_BACKUP;
+
+  if (sharedApiKey) {
+    return { apiKey: sharedApiKey, usedKeyType: 'shared' };
+  }
+
+  return { apiKey: null, usedKeyType: 'none' };
+}
+
+function withOptionalToken(rawUrl: string, apiKey: string | null): string {
+  if (!apiKey) return rawUrl;
+
+  const url = new URL(rawUrl);
+  url.searchParams.set('token', apiKey);
+  return url.toString();
+}
+
+function redactSensitiveUrl(rawUrl: string): string {
+  try {
+    const url = new URL(rawUrl);
+    if (url.searchParams.has('token')) {
+      url.searchParams.set('token', '[REDACTED]');
+    }
+    return url.toString();
+  } catch {
+    return rawUrl.replace(/token=[^&]+/g, 'token=[REDACTED]');
+  }
+}
+
+function withOptionalAuthorization(
+  baseHeaders: Record<string, string>,
+  apiKey: string | null,
+): Record<string, string> {
+  return apiKey ? { ...baseHeaders, Authorization: `Bearer ${apiKey}` } : baseHeaders;
+}
+
+function toDataUrl(payload: ArrayBuffer, contentType: string): string {
+  return `data:${contentType};base64,${Buffer.from(payload).toString('base64')}`;
+}
+
 // Simple token estimator (approximate): ~4 characters per token
 function estimateTokens(text: string): number {
   const t = (text || '').replace(/\s+/g, ' ').trim();
@@ -62,19 +109,7 @@ function getTTSPrefix(text: string): string {
 export async function POST(req: NextRequest) {
   try {
     const { messages, model, apiKey: apiKeyFromBody, imageDataUrl, voice } = await req.json();
-    // Use the provided token or fallback to environment variables or default token
-    const apiKey =
-      apiKeyFromBody ||
-      process.env.OPEN_PROVIDER_API_KEY ||
-      process.env.OPEN_PROVIDER_API_KEY_BACKUP ||
-      'EKfz9oU-FsP-Kz4w';
-    const usedKeyType = apiKeyFromBody
-      ? 'user'
-      : process.env.OPEN_PROVIDER_API_KEY
-        ? 'shared-primary'
-        : process.env.OPEN_PROVIDER_API_KEY_BACKUP
-          ? 'shared-backup'
-          : 'default';
+    const { apiKey, usedKeyType } = resolveApiKey(apiKeyFromBody);
 
     if (!model) return new Response(JSON.stringify({ error: 'Missing model id' }), { status: 400 });
 
@@ -118,18 +153,45 @@ export async function POST(req: NextRequest) {
     }
 
     if (isImageModel) {
-      // For image models, use the image generation endpoint with token authentication
-      const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?width=1024&height=1024&model=${encodeURIComponent(model)}&nologo=true&enhance=true&token=${encodeURIComponent(apiKey)}`;
+      const encodedPrompt = encodeURIComponent(prompt);
+      const upstreamImageUrl = withOptionalToken(
+        `https://image.pollinations.ai/prompt/${encodedPrompt}?width=1024&height=1024&model=${encodeURIComponent(model)}&nologo=true&enhance=true`,
+        apiKey,
+      );
+      const imageResponse = await fetch(upstreamImageUrl, {
+        headers: withOptionalAuthorization(
+          {
+            'User-Agent': 'Open-Fiesta/1.0',
+          },
+          apiKey,
+        ),
+      });
 
-      // Return the image URL directly without markdown text to avoid showing text before image loads
-      const text = `![Generated Image](${imageUrl})`;
+      if (!imageResponse.ok) {
+        const errorText = await imageResponse.text().catch(() => 'Unknown error');
+        return Response.json(
+          {
+            text: 'Image generation failed. Please try again.',
+            error: errorText,
+            code: imageResponse.status,
+            provider: 'open-provider',
+            usedKeyType,
+          },
+          { status: imageResponse.status },
+        );
+      }
+
+      const imageBuffer = await imageResponse.arrayBuffer();
+      const imageMimeType = imageResponse.headers.get('content-type') || 'image/png';
+      const imageDataUrl = toDataUrl(imageBuffer, imageMimeType);
+      const text = `![Generated Image](${imageDataUrl})`;
       const promptTokensEstimate = estimateTokens(prompt);
       return Response.json({
         text,
-        imageUrl,
+        imageUrl: imageDataUrl,
         provider: 'open-provider',
         usedKeyType,
-        isImageGeneration: true, // Flag to indicate this is image generation
+        isImageGeneration: true,
         tokens: {
           by: 'prompt',
           total: promptTokensEstimate,
@@ -151,18 +213,24 @@ export async function POST(req: NextRequest) {
           prompt.substring(0, 750) + '... [Audio truncated due to length limit]';
         const encodedPrompt = encodeURIComponent(truncatedPrompt);
         const selectedVoice = voice || 'alloy';
-        textUrl = `https://text.pollinations.ai/${encodedPrompt}?model=openai-audio&voice=${selectedVoice}&token=${encodeURIComponent(apiKey)}`;
+        textUrl = withOptionalToken(
+          `https://text.pollinations.ai/${encodedPrompt}?model=openai-audio&voice=${selectedVoice}`,
+          apiKey,
+        );
         useChunking = true;
       } else {
         // For shorter text, use full content
         const encodedPrompt = encodeURIComponent(prompt);
         const selectedVoice = voice || 'alloy';
-        textUrl = `https://text.pollinations.ai/${encodedPrompt}?model=openai-audio&voice=${selectedVoice}&token=${encodeURIComponent(apiKey)}`;
+        textUrl = withOptionalToken(
+          `https://text.pollinations.ai/${encodedPrompt}?model=openai-audio&voice=${selectedVoice}`,
+          apiKey,
+        );
       }
     } else {
       // Use OpenAI-compatible endpoint for text models
       const baseUrl = 'https://text.pollinations.ai/openai';
-      textUrl = `${baseUrl}?token=${encodeURIComponent(apiKey)}`;
+      textUrl = withOptionalToken(baseUrl, apiKey);
     }
 
     // Prepare the request body in OpenAI format for Pollinations API
@@ -200,7 +268,7 @@ export async function POST(req: NextRequest) {
           ? (requestBody as { messages: unknown[] }).messages.length || 0
           : 0;
       console.log(`Making request to Pollinations API for model: ${model}`, {
-        url: textUrl,
+        url: redactSensitiveUrl(textUrl),
         bodyPreview: isAudioModel
           ? {
               method: 'GET',
@@ -225,11 +293,14 @@ export async function POST(req: NextRequest) {
       const headers: Record<string, string> = {
         'Content-Type': 'application/json',
         'User-Agent': 'Open-Fiesta/1.0',
-        Authorization: `Bearer ${apiKey}`,
       };
 
+      if (apiKey) {
+        headers.Authorization = `Bearer ${apiKey}`;
+      }
+
       // Add additional headers for reasoning models
-      if (isReasoningModel) {
+      if (isReasoningModel && apiKey) {
         headers['X-API-Key'] = apiKey;
         headers['X-Model-Type'] = 'reasoning';
       }
@@ -237,10 +308,7 @@ export async function POST(req: NextRequest) {
       const resp = await fetch(textUrl, {
         method: isAudioModel ? 'GET' : 'POST',
         headers: isAudioModel
-          ? {
-              'User-Agent': 'Open-Fiesta/1.0',
-              Authorization: `Bearer ${apiKey}`,
-            }
+          ? withOptionalAuthorization({ 'User-Agent': 'Open-Fiesta/1.0' }, apiKey)
           : headers,
         ...(isAudioModel ? {} : { body: JSON.stringify(requestBody) }),
         signal: aborter.signal,
@@ -372,7 +440,6 @@ export async function POST(req: NextRequest) {
             }
           } catch {
             // If response looks like a URL, use it as audio URL
-            const responseText = await resp.text();
             if (
               responseText.startsWith('http') &&
               (responseText.includes('.mp3') ||

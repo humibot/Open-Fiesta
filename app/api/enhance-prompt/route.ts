@@ -20,14 +20,13 @@ export async function POST(req: NextRequest) {
       { role: 'user', content: `Please enhance this prompt: "${prompt}"` }
     ];
 
-    // Use the same API structure as the existing open-provider route
-    const apiKey = process.env.OPEN_PROVIDER_API_KEY || 'EKfz9oU-FsP-Kz4w';
+    const apiKey = process.env.OPEN_PROVIDER_API_KEY || process.env.OPEN_PROVIDER_API_KEY_BACKUP || null;
 
     // Try with primary model (GPT-4.1 Nano) first
     let response;
     try {
       const baseUrl = 'https://text.pollinations.ai/openai';
-      const textUrl = `${baseUrl}?token=${encodeURIComponent(apiKey)}`;
+      const textUrl = apiKey ? `${baseUrl}?token=${encodeURIComponent(apiKey)}` : baseUrl;
 
       const requestBody = {
         messages,
@@ -40,7 +39,8 @@ export async function POST(req: NextRequest) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'User-Agent': 'Open-Fiesta/1.0'
+          'User-Agent': 'Open-Fiesta/1.0',
+          ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {})
         },
         body: JSON.stringify(requestBody)
       });
@@ -52,7 +52,7 @@ export async function POST(req: NextRequest) {
       // Fallback to Llama4 Scout model
       console.log('Falling back to Llama4 Scout model');
       const baseUrl = 'https://text.pollinations.ai/openai';
-      const textUrl = `${baseUrl}?token=${encodeURIComponent(apiKey)}`;
+      const textUrl = apiKey ? `${baseUrl}?token=${encodeURIComponent(apiKey)}` : baseUrl;
 
       const requestBody = {
         messages,
@@ -65,7 +65,8 @@ export async function POST(req: NextRequest) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'User-Agent': 'Open-Fiesta/1.0'
+          'User-Agent': 'Open-Fiesta/1.0',
+          ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {})
         },
         body: JSON.stringify(requestBody)
       });

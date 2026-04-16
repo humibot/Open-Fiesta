@@ -71,7 +71,7 @@ async function testGeminiKey() {
 }
 
 async function testPollinationsKey() {
-  const key = process.env.OPEN_PROVIDER_API_KEY || 'EKfz9oU-FsP-Kz4w';
+  const key = process.env.OPEN_PROVIDER_API_KEY || process.env.OPEN_PROVIDER_API_KEY_BACKUP;
   if (!key) {
     log('❌ OPEN_PROVIDER_API_KEY not found in .env', 'red');
     return false;
